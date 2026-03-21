@@ -1,0 +1,20 @@
+env: dev
+
+openai_model: gpt-4o
+openai_temperature: 0.0
+
+redis_url: redis://localhost:6379/0
+redis_ttl_seconds: 86400
+
+k8s_in_cluster: false
+k8s_namespace: default
+
+prometheus_url: http://localhost:9090
+
+api_host: "0.0.0.0"
+api_port: 8000
+
+approval_timeout_seconds: 300
+
+log_level: INFO
+otel_service_name: auto-sre-agent

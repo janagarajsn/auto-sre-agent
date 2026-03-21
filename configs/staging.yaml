@@ -1,0 +1,5 @@
+env: staging
+log_level: INFO
+k8s_namespace: staging
+approval_timeout_seconds: 180
+redis_ttl_seconds: 43200

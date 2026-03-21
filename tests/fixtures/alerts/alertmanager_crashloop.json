@@ -1,0 +1,34 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"PodCrashLooping\"}",
+  "status": "firing",
+  "receiver": "sre-agent-webhook",
+  "groupLabels": { "alertname": "PodCrashLooping" },
+  "commonLabels": {
+    "alertname": "PodCrashLooping",
+    "namespace": "production",
+    "severity": "high"
+  },
+  "commonAnnotations": {
+    "summary": "Pod my-app-7d9f8b-xk2p is crash looping"
+  },
+  "externalURL": "http://alertmanager:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "PodCrashLooping",
+        "namespace": "production",
+        "pod": "my-app-7d9f8b-xk2p",
+        "container": "app",
+        "severity": "high"
+      },
+      "annotations": {
+        "summary": "Pod my-app-7d9f8b-xk2p is crash looping",
+        "description": "Pod production/my-app-7d9f8b-xk2p has restarted 12 times in 5 minutes."
+      },
+      "startsAt": "2024-01-15T10:30:00Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=rate%28kube_pod_container_status_restarts_total%5B5m%5D%29+%3E+0.1"
+    }
+  ]
+}

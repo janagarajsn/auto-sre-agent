@@ -1,0 +1,4 @@
+env: dev
+log_level: DEBUG
+approval_timeout_seconds: 60  # Faster feedback in local dev
+k8s_namespace: dev

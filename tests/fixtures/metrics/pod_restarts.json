@@ -1,0 +1,26 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "vector",
+    "result": [
+      {
+        "metric": {
+          "__name__": "kube_pod_container_status_restarts_total",
+          "container": "app",
+          "namespace": "production",
+          "pod": "my-app-7d9f8b-xk2p"
+        },
+        "value": [1705312200, "12"]
+      },
+      {
+        "metric": {
+          "__name__": "kube_pod_container_status_restarts_total",
+          "container": "sidecar",
+          "namespace": "production",
+          "pod": "my-app-7d9f8b-xk2p"
+        },
+        "value": [1705312200, "0"]
+      }
+    ]
+  }
+}

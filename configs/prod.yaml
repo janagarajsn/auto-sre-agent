@@ -1,0 +1,7 @@
+env: prod
+log_level: WARNING
+k8s_in_cluster: true
+k8s_namespace: production
+approval_timeout_seconds: 300
+redis_ttl_seconds: 604800  # 7 days
+openai_model: gpt-4o

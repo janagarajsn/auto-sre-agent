@@ -1,0 +1,65 @@
+replicaCount: 2
+
+image:
+  repository: auto-sre-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+env:
+  ENV: prod
+  LOG_LEVEL: WARNING
+  K8S_IN_CLUSTER: "true"
+
+# Reference to a Kubernetes Secret containing sensitive values:
+# OPENAI_API_KEY, API_KEY, REDIS_URL
+secretRef: auto-sre-agent-secrets
+
+redis:
+  url: redis://redis-master:6379/0
+
+prometheus:
+  url: http://prometheus-operated:9090
+
+serviceAccount:
+  create: true
+  name: auto-sre-agent
+
+rbac:
+  create: true
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: "/metrics"
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 10
