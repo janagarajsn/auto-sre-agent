@@ -123,7 +123,36 @@ Services started by Docker Compose:
 
 > **Important:** The Docker Compose Prometheus on port 9090 only scrapes the agent itself. It does **not** have Kubernetes metrics. See [Grafana setup](#grafana-and-kubernetes-metrics) below.
 
-### 5. Simulate an incident
+### 5. Point the agent at the in-cluster Prometheus
+
+By default `.env` has `PROMETHEUS_URL=http://localhost:9090` which points at the Docker Compose Prometheus (agent metrics only). For the agent to see real Kubernetes metrics during incident diagnosis, update `.env`:
+
+```
+PROMETHEUS_URL=http://host.docker.internal:9091
+```
+
+Then keep this port-forward running in a dedicated terminal before simulating incidents:
+
+```bash
+kubectl port-forward -n monitoring svc/prometheus-operated 9091:9090
+```
+
+Rebuild and restart the agent after changing `.env`:
+
+```bash
+docker-compose up -d --build agent
+```
+
+### 6. Simulate an incident
+
+Deploy a real crashlooping pod so the agent has actual metrics and logs to reason about:
+
+```bash
+kubectl create deployment crash-app --image=busybox -- sh -c "echo 'OOM error'; exit 1"
+
+# Wait until you see CrashLoopBackOff with a few restarts
+kubectl get po -w
+```
 
 Open a second terminal, activate the venv, and run:
 
@@ -131,6 +160,18 @@ Open a second terminal, activate the venv, and run:
 source venv/bin/activate
 python scripts/simulate_incident.py --alert PodCrashLooping --namespace default
 ```
+
+Expected output:
+```
+Incident completed:
+  ID:     <uuid>
+  Status: resolved
+  Root cause: Pod crash-app is crash looping. Logs show OOM error...
+  Action: restart_pod on crash-app
+  Result: success
+```
+
+> Without a real crashlooping pod, the agent will still run but return a low-confidence diagnosis (`confidence: 0.4`) because Prometheus has no metrics to return.
 
 Or send directly to the API:
 
@@ -142,7 +183,7 @@ curl -X POST http://localhost:8000/alerts/test \
     "alert_name": "PodCrashLooping",
     "severity": "high",
     "namespace": "default",
-    "labels": {"pod": "my-app-abc123"}
+    "labels": {"pod": "crash-app"}
   }'
 ```
 
@@ -188,13 +229,28 @@ Dashboards saved only in the Grafana UI are stored in the `grafana_data` Docker 
 
 > Use `docker-compose down` (without `-v`) for day-to-day restarts to preserve volumes. Only use `-v` when you need a clean slate.
 
+## Terminal layout (local dev)
+
+Running the full local stack requires several long-lived processes. Recommended layout:
+
+| Terminal | Command | Keep alive? |
+|---|---|---|
+| 1 | `docker-compose up` | Yes |
+| 2 | `kubectl port-forward -n monitoring svc/prometheus-operated 9091:9090` | Yes |
+| 3 | `kubectl get po -w` | Optional |
+| 4 | `source venv/bin/activate && python scripts/simulate_incident.py ...` | One-off |
+
+> The port-forward in Terminal 2 must be running before you trigger any incident — the agent queries the in-cluster Prometheus at `host.docker.internal:9091` during the detect phase.
+
 ## Configuration
 
-Settings are loaded in this order (highest precedence last):
+Settings load in this order — **last wins**:
 
 ```
-configs/base.yaml → configs/{ENV}.yaml → environment variables (.env)
+configs/base.yaml → configs/{ENV}.yaml → environment variables
 ```
+
+Environment variables (set by `docker-compose environment:` block or Kubernetes) always take highest precedence. The `.env` file is for local dev only and is excluded from the Docker image via `.dockerignore`.
 
 Set `ENV=dev`, `ENV=staging`, or `ENV=prod` to switch overlays. All available variables are documented in [.env.example](.env.example).
 
@@ -218,20 +274,49 @@ curl -X POST http://localhost:8000/approvals/{approval_id} \
 
 The graph resumes automatically and executes (or skips) the action based on the decision.
 
-## Alertmanager integration
+## Alertmanager integration (auto-trigger)
 
-Point Alertmanager at the agent webhook:
+Wire up Alertmanager so the agent kicks off automatically when an alert fires — no manual simulation needed.
 
-```yaml
-# alertmanager.yml
+**Step 1** — Patch the in-cluster Alertmanager config to webhook the agent:
+
+```bash
+kubectl -n monitoring create secret generic alertmanager-prometheus-kube-prometheus-alertmanager \
+  --from-literal=alertmanager.yaml='
+global:
+  resolve_timeout: 5m
+route:
+  group_by: ["alertname", "namespace"]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 12h
+  receiver: sre-agent
 receivers:
   - name: sre-agent
     webhook_configs:
-      - url: http://auto-sre-agent:8000/alerts/
+      - url: "http://host.docker.internal:8000/alerts/"
         http_config:
           authorization:
             type: ApiKey
-            credentials: your-api-key
+            credentials: change-me
+        send_resolved: false
+' --dry-run=client -o yaml | kubectl apply -f -
+```
+
+**Step 2** — Restart Alertmanager to pick up the new config:
+
+```bash
+kubectl rollout restart statefulset/alertmanager-prometheus-kube-prometheus-alertmanager -n monitoring
+```
+
+**Step 3** — Verify by opening `http://localhost:9091/alerts` in your browser. Once `crash-app` has been running for 2+ minutes, `PodCrashLooping` will appear as firing and Alertmanager will POST to the agent automatically.
+
+> `host.docker.internal:8000` is how the Kind cluster reaches the agent running in Docker Compose on your Mac. On Linux, replace with your host IP.
+
+For production Kubernetes deployments, deploy the agent inside the cluster and use the service DNS name instead:
+
+```yaml
+url: "http://auto-sre-agent.sre-agent.svc.cluster.local:8000/alerts/"
 ```
 
 ## Adding a new tool
@@ -285,6 +370,50 @@ helm upgrade --install auto-sre-agent deploy/helm/auto-sre-agent \
 ```bash
 kubectl apply -k deploy/k8s/overlays/prod
 ```
+
+## Troubleshooting
+
+**`/incidents/` returns Internal Server Error**
+The agent container is not reaching Redis. Check:
+```bash
+docker-compose exec agent env | grep -i redis   # should show redis://redis:6379/0
+docker-compose logs agent --tail=30             # look for ConnectionRefusedError
+```
+If `REDIS_URL` shows `localhost:6379`, rebuild the image (`.env` may have been baked in):
+```bash
+docker-compose build --no-cache agent && docker-compose up -d
+```
+
+**Diagnosis returns `confidence: 0.4` with empty metrics**
+The agent can't find metrics for the pod. Two common causes:
+1. `PROMETHEUS_URL` in `.env` still points to `localhost:9090` (Docker Compose Prometheus) instead of `host.docker.internal:9091` (in-cluster Prometheus)
+2. The port-forward to the in-cluster Prometheus is not running — start it in a dedicated terminal
+
+**Grafana shows "no such host" for Prometheus datasource**
+Containers are not on the same Docker network. Ensure `docker-compose.yaml` has an explicit `networks: sre:` block and all services reference it. Then:
+```bash
+docker-compose down && docker-compose up -d
+```
+
+**Grafana dashboard 15661 shows no data**
+The datasource variable at the top of the dashboard is still set to the old Docker Compose Prometheus. Click the datasource dropdown and switch it to `host.docker.internal:9091`.
+
+**`ModuleNotFoundError: No module named 'pydantic'` when running scripts**
+The venv is not active or packages were installed in a different environment:
+```bash
+source venv/bin/activate
+pip show pydantic  # should show Location: .../venv/lib/...
+```
+If `which python` shows `/opt/homebrew/...` instead of `venv/bin/python`, you have a shell alias overriding venv activation:
+```bash
+unalias python
+```
+
+**`unknown command 'FT._LIST'` from Redis**
+You are using plain `redis:alpine` instead of Redis Stack. The LangGraph checkpointer requires the RediSearch module. Ensure `docker-compose.yaml` uses `redis/redis-stack-server:latest`.
+
+**Simulated pod terminates after agent restart action**
+Expected if the pod was created with `kubectl run` (bare pod — no controller). Use `kubectl create deployment` instead so the Deployment controller recreates the pod after deletion.
 
 ## API reference
 
