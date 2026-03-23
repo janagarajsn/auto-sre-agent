@@ -42,9 +42,9 @@ Alertmanager (or simulate_incident.py)
         │
         ▼
   LangGraph pipeline
-  ┌─────────────────────────────────────────────┐
+  ┌────────────────────────────────────────────────────────────┐
   │  detect → diagnose → plan → [approve] → execute → observe  │
-  └─────────────────────────────────────────────┘
+  └────────────────────────────────────────────────────────────┘
         │              │              │
    Prometheus      OpenAI LLM    Kubernetes API
         │
