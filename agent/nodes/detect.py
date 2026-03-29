@@ -12,6 +12,7 @@ import asyncio
 from observability.logging import get_logger
 from agent.core.state import AgentState
 from memory.schemas import IncidentStatus
+from tools.kubernetes.deployments import get_deployment_rollout_info
 from tools.kubernetes.events import list_recent_events
 from tools.kubernetes.pods import get_pod_logs, list_pods
 from tools.prometheus.metrics import (
@@ -36,6 +37,7 @@ async def detect_node(state: AgentState) -> dict:
     error_rate_task = get_http_error_rate(namespace)
     events_task = list_recent_events(namespace, event_type="Warning")
     pods_task = list_pods(namespace)
+    rollout_task = get_deployment_rollout_info(namespace)
 
     (
         cpu,
@@ -44,6 +46,7 @@ async def detect_node(state: AgentState) -> dict:
         error_rate,
         events,
         pods,
+        rollout_info,
     ) = await asyncio.gather(
         cpu_task,
         mem_task,
@@ -51,6 +54,7 @@ async def detect_node(state: AgentState) -> dict:
         error_rate_task,
         events_task,
         pods_task,
+        rollout_task,
         return_exceptions=True,
     )
 
@@ -71,6 +75,7 @@ async def detect_node(state: AgentState) -> dict:
         "restarts": restarts if not isinstance(restarts, Exception) else [],
         "error_rate": error_rate if not isinstance(error_rate, Exception) else [],
         "pods": pods if not isinstance(pods, Exception) else [],
+        "deployment_rollout": rollout_info if not isinstance(rollout_info, Exception) else [],
     }
 
     logger.info("detect node complete", metrics_keys=list(raw_metrics.keys()))

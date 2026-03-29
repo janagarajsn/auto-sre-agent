@@ -5,7 +5,12 @@ You will receive:
 - Recent Kubernetes Warning events
 - Pod restart counts
 - CPU and memory metrics
+- Deployment rollout state: current image, previous image, ready vs desired replicas
 - Recent pod logs (if available)
+
+If `deployment_rollout` shows `current_image != previous_image` AND `ready_replicas < desired_replicas`,
+the most likely root cause is a bad deployment update. State this explicitly in root_cause so the
+remediation layer can choose rollback over restart.
 
 Your task:
 Analyse all signals and identify the most likely root cause.

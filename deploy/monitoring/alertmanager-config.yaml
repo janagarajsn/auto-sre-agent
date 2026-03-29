@@ -1,0 +1,28 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: sre-agent-webhook
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  route:
+    receiver: sre-agent
+    groupBy: ["alertname", "namespace"]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+    matchers:
+      - name: alertname
+        matchType: "=~"
+        value: "DeploymentReplicasMismatch|PodOOMKilled|HighCpuUsage|HighMemoryUsage|HighErrorRate|HighP99Latency"
+  receivers:
+    - name: sre-agent
+      webhookConfigs:
+        - url: "http://host.docker.internal:8000/alerts/"
+          httpConfig:
+            authorization:
+              type: ApiKey
+              credentials:
+                key: api-key
+                name: sre-agent-secret

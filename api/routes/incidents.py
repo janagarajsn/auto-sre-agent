@@ -26,7 +26,14 @@ async def list_incidents(limit: int = 20) -> list[dict]:
 async def list_pending_approvals() -> list[dict]:
     store = await get_incident_store()
     incidents = await store.list_by_status(IncidentStatus.AWAITING_APPROVAL)
-    return [i.model_dump(mode="json") for i in incidents]
+    results = []
+    for i in incidents:
+        data = i.model_dump(mode="json")
+        # Surface approval_id at the top level for easy copy-paste
+        if i.approval:
+            data["approval_id"] = str(i.approval.id)
+        results.append(data)
+    return results
 
 
 @router.get("/{incident_id}", dependencies=[Depends(require_api_key)])

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
 from agent.core.agent import run_incident
 from api.middleware.auth import require_api_key
@@ -44,7 +44,10 @@ def _alertmanager_to_signal(alert: AlertmanagerAlert) -> AlertSignal:
 async def receive_alertmanager_webhook(
     payload: AlertmanagerPayload,
     background_tasks: BackgroundTasks,
+    request: Request,
 ) -> dict:
+    import logging
+    logging.warning("ALERTMANAGER HEADERS: %s", dict(request.headers))
     """
     Receive Alertmanager webhook and dispatch each firing alert to the SRE agent.
     Returns immediately (202 Accepted); agent runs in background.

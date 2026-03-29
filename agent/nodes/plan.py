@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta
+from uuid import uuid4
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -16,8 +18,10 @@ from langchain_openai import ChatOpenAI
 from agent.core.state import AgentState
 from agent.prompts import load_prompt
 from configs.settings import get_settings
-from memory.schemas import ActionType, IncidentStatus, ProposedAction, Severity
+from memory.long_term import get_incident_store
+from memory.schemas import ActionType, ApprovalRequest, IncidentStatus, ProposedAction, Severity
 from observability.logging import get_logger
+from tools.redis.client import get_redis_client
 
 logger = get_logger(__name__)
 
@@ -61,11 +65,45 @@ async def plan_node(state: AgentState) -> dict:
         requires_approval=proposed.requires_approval,
     )
 
-    return {
+    result: dict = {
         "proposed_action": proposed,
         "status": IncidentStatus.AWAITING_APPROVAL if proposed.requires_approval else IncidentStatus.EXECUTING,
         "messages": [response],
     }
+
+    # If approval is required, create and persist the ApprovalRequest NOW —
+    # before the graph hits interrupt_before=["approve"] and pauses.
+    # This ensures /approvals/pending can surface the approval_id immediately.
+    if proposed.requires_approval:
+        approval_request = ApprovalRequest(
+            id=uuid4(),
+            incident_id=state["incident_id"],
+            proposed_action=proposed,
+            expires_at=datetime.utcnow() + timedelta(seconds=settings.approval_timeout_seconds),
+        )
+        redis = get_redis_client()
+        await redis.set(
+            f"sre:approval:{approval_request.id}",
+            approval_request.model_dump_json(),
+            ex=settings.approval_timeout_seconds + 60,
+        )
+        # Also write approval into the incident record so the API surfaces it
+        store = await get_incident_store()
+        incident = await store.get(state["incident_id"])
+        if incident:
+            incident.approval = approval_request
+            incident.status = IncidentStatus.AWAITING_APPROVAL
+            await store.save(incident)
+
+        logger.info(
+            "approval request created",
+            approval_id=str(approval_request.id),
+            action=proposed.action_type,
+            expires_in_seconds=settings.approval_timeout_seconds,
+        )
+        result["approval_request"] = approval_request
+
+    return result
 
 
 def _needs_approval(action: ProposedAction, is_prod: bool) -> bool:

@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from prometheus_client import make_asgi_app
 
 from api.middleware.logging import LoggingMiddleware
-from api.routes import alerts, approvals, health, incidents
+from api.routes import alerts, approvals, health, incidents, ui
 from observability.logging import configure_logging, get_logger
 from observability.metrics import REGISTRY
 from observability.tracing import configure_tracing
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
     app.include_router(approvals.router, prefix="/approvals", tags=["approvals"])
     app.include_router(incidents.router, prefix="/incidents", tags=["incidents"])
+    app.include_router(ui.router, prefix="/ui", tags=["ui"])
 
     # Expose Prometheus metrics on /metrics
     metrics_app = make_asgi_app(registry=REGISTRY)

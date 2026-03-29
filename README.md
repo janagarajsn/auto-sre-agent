@@ -1,28 +1,26 @@
 # auto-sre-agent
 
-An autonomous AI-powered Site Reliability Engineering agent that monitors Kubernetes infrastructure, detects anomalies, and executes corrective actions — with human-in-the-loop approval for high-risk operations.
+An autonomous AI-powered SRE agent that monitors Kubernetes, detects anomalies, and executes corrective actions — with human-in-the-loop approval for high-risk operations.
 
 ## How it works
 
-When an alert fires (via Alertmanager or manual trigger), the agent runs a LangGraph pipeline:
-
 ```
-Alert received
+Alert received (Alertmanager webhook or manual trigger)
      │
-  detect        ← fetch live metrics, pod logs, k8s events
+  detect        ← fetch live metrics, pod logs, k8s events from Prometheus + k8s API
      │
-  diagnose      ← LLM root cause analysis
+  diagnose      ← LLM root cause analysis (GPT-4o)
      │
   plan          ← LLM selects corrective action
      │
- [approve]      ← human gate (high-risk actions only)
+ [approve]      ← human gate for high-risk actions (rollbacks, cordon)
      │
   execute       ← runs the action via Kubernetes API
      │
   observe       ← verifies recovery, saves incident record
 ```
 
-Graph state is checkpointed in Redis after each node, enabling fault-tolerant execution and resumption after human approval.
+Graph state is checkpointed in Redis after each node. If the process restarts mid-run, it resumes from the last checkpoint.
 
 ## Tech stack
 
@@ -31,42 +29,49 @@ Graph state is checkpointed in Redis after each node, enabling fault-tolerant ex
 | Agent orchestration | LangGraph + LangChain |
 | LLM | OpenAI GPT-4o |
 | API | FastAPI |
-| State / memory | Redis Stack (requires RediSearch module) |
-| Metrics source | Prometheus |
+| State / memory | Redis Stack (RediSearch required) |
+| Metrics | Prometheus |
 | Visualization | Grafana |
 | Infrastructure | Kubernetes (Kind for local dev) |
-| Deployment | Helm + Kustomize |
 | Language | Python 3.11+ |
 
 ## Project structure
 
 ```
 auto-sre-agent/
-├── agent/                  # LangGraph nodes, graph assembly, prompts
-│   ├── core/               # AgentState, router, entrypoint
+├── agent/
+│   ├── core/               # AgentState, router, run_incident() entrypoint
 │   ├── nodes/              # detect, diagnose, plan, approve, execute, observe
-│   ├── prompts/            # Markdown prompt templates
-│   └── workflows/          # Compiled StateGraph + subgraph stubs
-├── tools/                  # External integrations (BaseTool registry)
-│   ├── prometheus/         # PromQL client + named metric helpers
+│   ├── prompts/            # Markdown prompt templates (diagnose.md, plan.md)
+│   └── workflows/          # Compiled StateGraph (sre_graph.py)
+├── api/
+│   ├── middleware/         # Auth (X-API-Key), structured request logging
+│   ├── routes/             # alerts, approvals, incidents, health, ui
+│   └── schemas/            # Pydantic request/response models
+├── tools/
 │   ├── kubernetes/         # Pod restart, deployment scale/rollback, events
-│   ├── redis/              # Client, distributed locks, context store
-│   └── future/             # AWS / GCP stubs
-├── memory/                 # Schemas, AgentState, Redis incident store, checkpointer
-├── api/                    # FastAPI: webhook receiver, approvals, incidents, health
-├── configs/                # Pydantic settings + per-environment YAML overlays
-├── observability/          # Structured logging, Prometheus metrics, OpenTelemetry
-│   └── provisioning/       # Grafana auto-provisioned datasources and dashboards
-├── deploy/                 # Helm chart, Kustomize overlays, Kind config, alert rules
-├── tests/                  # Unit, integration, e2e
-└── scripts/                # Local dev: bootstrap, simulate incident, seed metrics
+│   ├── prometheus/         # PromQL client, named metric helpers
+│   └── redis/              # Client, distributed locks, incident context store
+├── memory/
+│   ├── schemas.py          # Domain models: Incident, Diagnosis, ProposedAction, ApprovalRequest
+│   ├── short_term.py       # AgentState TypedDict
+│   ├── long_term.py        # Redis-backed IncidentStore
+│   └── checkpointer.py     # LangGraph Redis checkpointer setup
+├── configs/                # Pydantic settings + base/dev/prod YAML overlays
+├── observability/          # Structured logging, Prometheus metrics, OpenTelemetry tracing
+├── deploy/
+│   ├── kind/               # Kind cluster config
+│   ├── monitoring/         # PrometheusRule CRDs, Alertmanager config
+│   └── helm/               # Helm chart for production deployment
+├── scripts/                # bootstrap.sh, simulate_incident.py
+└── tests/                  # unit, integration, e2e
 ```
 
-## Quickstart (local)
+---
+
+## Setup
 
 ### Prerequisites
-
-The bootstrap script checks for these before doing anything — install all before running it:
 
 | Tool | Install |
 |---|---|
@@ -85,335 +90,197 @@ cp .env.example .env
 # Edit .env — set OPENAI_API_KEY and API_KEY at minimum
 ```
 
-### 2. Set up Python environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[dev]"
-```
-
-> **Note:** If you have a Homebrew Python alias in your shell (`python` aliased to `/opt/homebrew/...`), it overrides venv activation. Run `unalias python` in your session, or always use `venv/bin/python` explicitly.
-
-### 3. Bootstrap the Kind cluster
+### 2. Bootstrap the Kind cluster
 
 ```bash
 chmod +x scripts/bootstrap.sh
 ./scripts/bootstrap.sh
 ```
 
-This creates a 3-node Kind cluster and installs `kube-prometheus-stack` and Redis into it. Safe to re-run — the cluster creation step is idempotent.
+Creates a 3-node Kind cluster and installs `kube-prometheus-stack` and Redis into it. Safe to re-run — cluster creation is idempotent.
 
-### 4. Start the local stack
-
-Run this in a dedicated terminal (keep it running):
+### 3. Start the stack
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
-Services started by Docker Compose:
-
-| Service | URL | Purpose |
+| Service | URL | Notes |
 |---|---|---|
-| Agent API | http://localhost:8000/docs | FastAPI — use `/docs` not `/` (no root route) |
-| Grafana | http://localhost:3000 | Dashboards |
+| Agent API | http://localhost:8000/docs | Swagger UI |
+| Dashboard UI | http://localhost:8000/ui | Approvals + Incidents |
+| Grafana | http://localhost:3000 | No login required |
 | Prometheus (agent) | http://localhost:9090 | Scrapes agent `/metrics` only |
-| Redis Stack | localhost:6379 | Agent state + LangGraph checkpointing |
+| Redis | localhost:6379 | Agent state + LangGraph checkpoints |
 
-> **Important:** The Docker Compose Prometheus on port 9090 only scrapes the agent itself. It does **not** have Kubernetes metrics. See [Grafana setup](#grafana-and-kubernetes-metrics) below.
+> `PROMETHEUS_URL` is already set to `http://host.docker.internal:9091` in `docker-compose.yaml`. The agent reads Kubernetes metrics via port-forward (step 4).
 
-### 5. Point the agent at the in-cluster Prometheus
-
-By default `.env` has `PROMETHEUS_URL=http://localhost:9090` which points at the Docker Compose Prometheus (agent metrics only). For the agent to see real Kubernetes metrics during incident diagnosis, update `.env`:
-
-```
-PROMETHEUS_URL=http://host.docker.internal:9091
-```
-
-Then keep this port-forward running in a dedicated terminal before simulating incidents:
+### 4. Start port-forwards (keep these running in dedicated terminals)
 
 ```bash
-kubectl port-forward -n monitoring svc/prometheus-operated 9091:9090
+# Terminal A — in-cluster Prometheus (Kubernetes metrics)
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-prometheus 9091:9090
+
+# Terminal B — Alertmanager (optional, for inspecting alert routing)
+kubectl port-forward -n monitoring svc/prometheus-kube-prometheus-alertmanager 9093:9093
 ```
 
-Rebuild and restart the agent after changing `.env`:
+> Port-forward in Terminal A must be running before simulating any incident. Without it, the agent gets empty metrics and returns a low-confidence diagnosis.
+
+### 5. Configure Alertmanager to webhook the agent
+
+Patch the in-cluster Alertmanager secret to route alerts to the agent:
 
 ```bash
-docker-compose up -d --build agent
+kubectl patch secret alertmanager-prometheus-kube-prometheus-alertmanager -n monitoring \
+  --type='merge' \
+  -p="$(cat <<'EOF'
+{
+  "stringData": {
+    "alertmanager.yaml": "global:\n  resolve_timeout: 5m\nroute:\n  group_by: ['alertname', 'namespace']\n  group_wait: 30s\n  group_interval: 5m\n  repeat_interval: 4h\n  receiver: 'null'\n  routes:\n  - matchers:\n    - alertname = Watchdog\n    receiver: 'null'\n  - matchers:\n    - alertname =~ \"PodCrashLooping|DeploymentReplicasMismatch|PodOOMKilled|HighCpuUsage|HighMemoryUsage\"\n    receiver: sre-agent\nreceivers:\n- name: 'null'\n- name: sre-agent\n  webhook_configs:\n  - url: 'http://host.docker.internal:8000/alerts/'\n    http_config:\n      authorization:\n        type: ApiKey\n        credentials: change-me\ninhibit_rules:\n- source_matchers: [severity = critical]\n  target_matchers: [severity =~ warning|info]\n  equal: [namespace, alertname]\n"
+  }
+}
+EOF
+)"
 ```
 
-### 6. Simulate an incident
+> `host.docker.internal:8000` is how the Kind cluster reaches the agent running in Docker Compose on your Mac.
 
-Deploy a real crashlooping pod so the agent has actual metrics and logs to reason about:
+---
+
+## Simulating incidents
+
+Always flush Redis before each demo to clear deduplication locks from previous runs:
 
 ```bash
-kubectl create deployment crash-app --image=busybox -- sh -c "echo 'OOM error'; exit 1"
-
-# Wait until you see CrashLoopBackOff with a few restarts
-kubectl get po -w
+docker exec auto-sre-agent-redis-1 redis-cli FLUSHALL
 ```
 
-Open a second terminal, activate the venv, and run:
+### Scenario 1 — PodCrashLooping (auto-remediation, no approval)
+
+Deploy a pod that crashes immediately:
+
+```bash
+kubectl run crash-app --image=busybox --restart=Always -n default -- sh -c "exit 1"
+```
+
+**Option A — Wait for Alertmanager (fully automatic)**
+
+The `PodCrashLooping` rule has `for: 0m` so the alert fires as soon as the pod enters `CrashLoopBackOff` (~30–60s). Alertmanager routes it to the agent within another 30s (group_wait).
+
+**Option B — Trigger manually right now (no Alertmanager wait)**
+
+```bash
+# Via the API (agent must be running via docker compose)
+curl -X POST http://localhost:8000/alerts/test \
+  -H "X-API-Key: change-me" -H "Content-Type: application/json" \
+  -d '{"alert_name": "PodCrashLooping", "severity": "high", "namespace": "default", "labels": {"pod": "crash-app"}}'
+
+# OR directly from terminal (bypasses the API entirely)
+source venv/bin/activate
+python scripts/simulate_incident.py --alert PodCrashLooping --namespace default --pod crash-app
+```
+
+Watch the agent work:
+```bash
+docker compose logs -f agent
+```
+
+The agent will detect, diagnose, plan `restart_pod`, and execute it automatically — no approval needed in dev mode.
+
+Clean up after the demo:
+```bash
+kubectl delete pod crash-app -n default
+```
+
+### Scenario 2 — DeploymentReplicasMismatch (HITL rollback, requires approval)
+
+**Step 1** — Deploy the web-app (skip if already running):
+```bash
+kubectl create deployment web-app --image=nginx:alpine --replicas=1 -n default
+```
+
+Wait until it's running:
+```bash
+kubectl rollout status deployment/web-app -n default
+```
+
+**Step 2** — Break it with a bad image update:
+```bash
+kubectl patch deployment web-app -n default --type='json' \
+  -p='[
+    {"op":"replace","path":"/spec/template/spec/containers/0/image","value":"busybox"},
+    {"op":"add","path":"/spec/template/spec/containers/0/command","value":["sh","-c","exit 1"]}
+  ]'
+```
+
+**Step 3** — Trigger the agent.
+
+**Option A — Wait for Alertmanager (fully automatic)**
+
+The `DeploymentReplicasMismatch` rule has `for: 5m`, so the alert fires after 5 minutes of replica mismatch. Watch it at `http://localhost:9091/alerts`.
+
+**Option B — Trigger manually right now (no 5-minute wait)**
+
+```bash
+# Via the API (agent must be running via docker compose)
+curl -X POST http://localhost:8000/alerts/test \
+  -H "X-API-Key: change-me" -H "Content-Type: application/json" \
+  -d '{"alert_name": "DeploymentReplicasMismatch", "severity": "high", "namespace": "default", "labels": {"deployment": "web-app"}}'
+
+# OR directly from terminal
+source venv/bin/activate
+python scripts/simulate_incident.py --alert DeploymentReplicasMismatch --namespace default --pod web-app
+```
+
+> For the manual trigger to produce a confident diagnosis, the broken deployment must already be in place (Step 2) so Prometheus has replica mismatch metrics to return.
+
+**Step 4** — The agent will detect the mismatch, diagnose it as a bad deployment update, and plan a `rollback_deployment`. This requires approval. Open the dashboard:
+
+```
+http://localhost:8000/ui
+```
+
+The **Pending Approvals** tab shows the approval card with action details, risk level, and rationale. Click **Approve** to let the agent execute the rollback.
+
+**Step 5** — After approval, the agent rolls back to the previous ReplicaSet (nginx:alpine). Verify:
+```bash
+kubectl rollout status deployment/web-app -n default
+kubectl get pods -n default
+```
+
+### Manual trigger (no Alertmanager needed)
 
 ```bash
 source venv/bin/activate
 python scripts/simulate_incident.py --alert PodCrashLooping --namespace default
 ```
 
-Expected output:
-```
-Incident completed:
-  ID:     <uuid>
-  Status: resolved
-  Root cause: Pod crash-app is crash looping. Logs show OOM error...
-  Action: restart_pod on crash-app
-  Result: success
-```
-
-> Without a real crashlooping pod, the agent will still run but return a low-confidence diagnosis (`confidence: 0.4`) because Prometheus has no metrics to return.
-
-Or send directly to the API:
-
-```bash
-curl -X POST http://localhost:8000/alerts/test \
-  -H "X-API-Key: change-me" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "alert_name": "PodCrashLooping",
-    "severity": "high",
-    "namespace": "default",
-    "labels": {"pod": "crash-app"}
-  }'
-```
-
-## Grafana and Kubernetes metrics
-
-There are **two separate Prometheus instances** in the local setup:
-
-| Instance | Where | Scrapes |
-|---|---|---|
-| Docker Compose Prometheus | `localhost:9090` | Agent `/metrics` only |
-| In-cluster Prometheus | Kind cluster | All Kubernetes metrics (pods, nodes, deployments) |
-
-To see Kubernetes metrics in Grafana, you need to point it at the in-cluster Prometheus.
-
-**Step 1** — Port-forward the in-cluster Prometheus to a different port (keep this running in its own terminal):
-
-```bash
-kubectl port-forward -n monitoring svc/prometheus-operated 9091:9090
-```
-
-Use port `9091` to avoid conflicting with the Docker Compose Prometheus already on `9090`.
-
-**Step 2** — Add a second datasource in Grafana:
-
-1. Go to `http://localhost:3000` → Connections → Data Sources → Add new
-2. Type: Prometheus
-3. URL: `http://host.docker.internal:9091`
-4. Save & Test — should show green
-
-**Step 3** — Import a Kubernetes dashboard:
-
-1. Dashboards → Import → enter ID `15661` → Load
-2. Select the `host.docker.internal:9091` datasource
-3. Import — panels will populate immediately
-
-### Persisting dashboards
-
-Dashboards saved only in the Grafana UI are stored in the `grafana_data` Docker volume and will be lost on `docker-compose down -v`. To persist them:
-
-1. In Grafana: Dashboard → Share → Export → Save to file
-2. Drop the JSON into `observability/provisioning/dashboards/`
-3. Grafana auto-provisions it on next restart
-
-> Use `docker-compose down` (without `-v`) for day-to-day restarts to preserve volumes. Only use `-v` when you need a clean slate.
-
-## Terminal layout (local dev)
-
-Running the full local stack requires several long-lived processes. Recommended layout:
-
-| Terminal | Command | Keep alive? |
-|---|---|---|
-| 1 | `docker-compose up` | Yes |
-| 2 | `kubectl port-forward -n monitoring svc/prometheus-operated 9091:9090` | Yes |
-| 3 | `kubectl get po -w` | Optional |
-| 4 | `source venv/bin/activate && python scripts/simulate_incident.py ...` | One-off |
-
-> The port-forward in Terminal 2 must be running before you trigger any incident — the agent queries the in-cluster Prometheus at `host.docker.internal:9091` during the detect phase.
-
-## Configuration
-
-Settings load in this order — **last wins**:
-
-```
-configs/base.yaml → configs/{ENV}.yaml → environment variables
-```
-
-Environment variables (set by `docker-compose environment:` block or Kubernetes) always take highest precedence. The `.env` file is for local dev only and is excluded from the Docker image via `.dockerignore`.
-
-Set `ENV=dev`, `ENV=staging`, or `ENV=prod` to switch overlays. All available variables are documented in [.env.example](.env.example).
+---
 
 ## Human-in-the-loop approvals
 
-High-risk actions (rollbacks, node cordons) suspend the graph and wait for a human decision.
+High-risk actions (rollbacks, node cordons) suspend the LangGraph graph and wait for a human decision.
 
-**Check pending approvals:**
-```bash
-curl http://localhost:8000/incidents/pending-approvals \
-  -H "X-API-Key: change-me"
+**Dashboard UI (recommended):**
+```
+http://localhost:8000/ui
 ```
 
-**Submit a decision:**
+**Via curl:**
 ```bash
+# List pending approvals
+curl http://localhost:8000/approvals/pending -H "X-API-Key: change-me"
+
+# Submit a decision
 curl -X POST http://localhost:8000/approvals/{approval_id} \
-  -H "X-API-Key: change-me" \
-  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me" -H "Content-Type: application/json" \
   -d '{"approved": true, "reviewer": "alice", "notes": "Confirmed safe to rollback"}'
 ```
 
-The graph resumes automatically and executes (or skips) the action based on the decision.
+Approvals expire after 15 minutes (`approval_timeout_seconds: 900` in `configs/base.yaml`).
 
-## Alertmanager integration (auto-trigger)
-
-Wire up Alertmanager so the agent kicks off automatically when an alert fires — no manual simulation needed.
-
-**Step 1** — Patch the in-cluster Alertmanager config to webhook the agent:
-
-```bash
-kubectl -n monitoring create secret generic alertmanager-prometheus-kube-prometheus-alertmanager \
-  --from-literal=alertmanager.yaml='
-global:
-  resolve_timeout: 5m
-route:
-  group_by: ["alertname", "namespace"]
-  group_wait: 10s
-  group_interval: 1m
-  repeat_interval: 12h
-  receiver: sre-agent
-receivers:
-  - name: sre-agent
-    webhook_configs:
-      - url: "http://host.docker.internal:8000/alerts/"
-        http_config:
-          authorization:
-            type: ApiKey
-            credentials: change-me
-        send_resolved: false
-' --dry-run=client -o yaml | kubectl apply -f -
-```
-
-**Step 2** — Restart Alertmanager to pick up the new config:
-
-```bash
-kubectl rollout restart statefulset/alertmanager-prometheus-kube-prometheus-alertmanager -n monitoring
-```
-
-**Step 3** — Verify by opening `http://localhost:9091/alerts` in your browser. Once `crash-app` has been running for 2+ minutes, `PodCrashLooping` will appear as firing and Alertmanager will POST to the agent automatically.
-
-> `host.docker.internal:8000` is how the Kind cluster reaches the agent running in Docker Compose on your Mac. On Linux, replace with your host IP.
-
-For production Kubernetes deployments, deploy the agent inside the cluster and use the service DNS name instead:
-
-```yaml
-url: "http://auto-sre-agent.sre-agent.svc.cluster.local:8000/alerts/"
-```
-
-## Adding a new tool
-
-1. Create `tools/your_integration/your_tool.py` extending `BaseTool`
-2. Implement `async def run(self, **kwargs) -> ToolResult`
-3. Register it in `tools/base.py` → `register_all_tools()`
-4. Call it from the relevant node via `ToolRegistry.get("your_tool_name")`
-
-```python
-from tools.base import BaseTool, ToolResult
-
-class MyNewTool(BaseTool):
-    name = "my_tool"
-    description = "Does something useful"
-
-    async def run(self, **kwargs) -> ToolResult:
-        return ToolResult.ok({"result": "done"})
-```
-
-## Running tests
-
-```bash
-# Unit + integration
-pytest tests/unit tests/integration -v
-
-# With coverage
-pytest tests/unit tests/integration --cov --cov-report=term-missing
-
-# End-to-end (requires running Kind cluster + real OpenAI key)
-RUN_E2E=1 pytest tests/e2e -v --no-cov
-```
-
-## Deployment
-
-### Helm (recommended)
-
-```bash
-kubectl create secret generic auto-sre-agent-secrets \
-  --from-literal=OPENAI_API_KEY=sk-... \
-  --from-literal=API_KEY=your-api-key \
-  --from-literal=REDIS_URL=redis://redis-master:6379/0
-
-helm upgrade --install auto-sre-agent deploy/helm/auto-sre-agent \
-  --namespace sre-agent --create-namespace \
-  --values deploy/helm/auto-sre-agent/values.yaml
-```
-
-### Kustomize (GitOps)
-
-```bash
-kubectl apply -k deploy/k8s/overlays/prod
-```
-
-## Troubleshooting
-
-**`/incidents/` returns Internal Server Error**
-The agent container is not reaching Redis. Check:
-```bash
-docker-compose exec agent env | grep -i redis   # should show redis://redis:6379/0
-docker-compose logs agent --tail=30             # look for ConnectionRefusedError
-```
-If `REDIS_URL` shows `localhost:6379`, rebuild the image (`.env` may have been baked in):
-```bash
-docker-compose build --no-cache agent && docker-compose up -d
-```
-
-**Diagnosis returns `confidence: 0.4` with empty metrics**
-The agent can't find metrics for the pod. Two common causes:
-1. `PROMETHEUS_URL` in `.env` still points to `localhost:9090` (Docker Compose Prometheus) instead of `host.docker.internal:9091` (in-cluster Prometheus)
-2. The port-forward to the in-cluster Prometheus is not running — start it in a dedicated terminal
-
-**Grafana shows "no such host" for Prometheus datasource**
-Containers are not on the same Docker network. Ensure `docker-compose.yaml` has an explicit `networks: sre:` block and all services reference it. Then:
-```bash
-docker-compose down && docker-compose up -d
-```
-
-**Grafana dashboard 15661 shows no data**
-The datasource variable at the top of the dashboard is still set to the old Docker Compose Prometheus. Click the datasource dropdown and switch it to `host.docker.internal:9091`.
-
-**`ModuleNotFoundError: No module named 'pydantic'` when running scripts**
-The venv is not active or packages were installed in a different environment:
-```bash
-source venv/bin/activate
-pip show pydantic  # should show Location: .../venv/lib/...
-```
-If `which python` shows `/opt/homebrew/...` instead of `venv/bin/python`, you have a shell alias overriding venv activation:
-```bash
-unalias python
-```
-
-**`unknown command 'FT._LIST'` from Redis**
-You are using plain `redis:alpine` instead of Redis Stack. The LangGraph checkpointer requires the RediSearch module. Ensure `docker-compose.yaml` uses `redis/redis-stack-server:latest`.
-
-**Simulated pod terminates after agent restart action**
-Expected if the pod was created with `kubectl run` (bare pod — no controller). Use `kubectl create deployment` instead so the Deployment controller recreates the pod after deletion.
+---
 
 ## API reference
 
@@ -425,10 +292,80 @@ Expected if the pod was created with `kubectl run` (bare pod — no controller).
 | `POST` | `/alerts/test` | Synchronous test trigger |
 | `GET` | `/incidents/` | List recent incidents |
 | `GET` | `/incidents/{id}` | Get incident by ID |
-| `GET` | `/incidents/pending-approvals` | List incidents awaiting approval |
+| `GET` | `/approvals/pending` | List approvals waiting for decision |
 | `GET` | `/approvals/{id}` | Get approval request status |
 | `POST` | `/approvals/{id}` | Submit approval decision |
+| `GET` | `/ui` | Dashboard (Approvals + Incidents) |
 | `GET` | `/metrics` | Prometheus metrics (agent-side) |
-| `GET` | `/docs` | Interactive API docs (Swagger UI) |
+| `GET` | `/docs` | Swagger UI |
 
 All endpoints except `/healthz` and `/readyz` require `X-API-Key` header.
+
+---
+
+## Common errors
+
+**`Invalid kube-config file` / `Network is unreachable host.docker.internal:<port>`**
+
+The Kind cluster was recreated and its API server port changed. Get the new port and update `docker-compose.yaml`:
+
+```bash
+kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' | grep -o ':[0-9]*' | tr -d ':'
+```
+
+Update `K8S_SERVER_OVERRIDE` in `docker-compose.yaml` to match, then rebuild:
+```bash
+docker compose up -d --build agent
+```
+
+> Never run `kubectl config set-cluster ... --server=...` — this patches your local kubeconfig and breaks `kubectl` in your terminal.
+
+---
+
+**Diagnosis returns `confidence: 0.4` with empty metrics**
+
+The port-forward to the in-cluster Prometheus (Terminal A, port 9091) is not running. Start it and retry.
+
+---
+
+**Alert fires in Prometheus but no POST to `/alerts/`**
+
+Two common causes:
+1. Alertmanager `repeat_interval` (4h) — the alert group was already sent and won't resend for 4 hours. Flush Redis and delete/recreate the pod to generate a new alert fingerprint.
+2. Alertmanager hasn't loaded the patched secret — verify with `http://localhost:9093` → Status.
+
+---
+
+**Agent goes NOOP for DeploymentReplicasMismatch**
+
+The Prometheus port-forward (9091) was not running during the detect phase — empty metrics → low confidence → NOOP. Flush Redis and retrigger.
+
+---
+
+**`PodCrashLooping` stuck on `pending` in Prometheus**
+
+You are looking at the built-in `KubePodCrashLooping` rule which has `for: 15m`. Use the custom `PodCrashLooping` rule (from `deploy/monitoring/prometheus-rules.yaml`) which has `for: 0m`.
+
+---
+
+**Alertmanager stops sending after a 401**
+
+Alertmanager treats 4xx as unrecoverable and stops retrying permanently. After fixing auth, restart Alertmanager and recreate the pod:
+```bash
+kubectl rollout restart statefulset/alertmanager-prometheus-kube-prometheus-alertmanager -n monitoring
+```
+
+---
+
+**`unknown command 'FT._LIST'` from Redis**
+
+Plain `redis:alpine` is running instead of Redis Stack. The LangGraph checkpointer requires the RediSearch module. Ensure `docker-compose.yaml` uses `redis/redis-stack-server:latest`.
+
+---
+
+**Deduplication: second incident not triggered even after first is resolved**
+
+Redis still holds the dedup lock (`sre:incident_lock:{alert_name}:{namespace}`). Flush Redis before each demo:
+```bash
+docker exec auto-sre-agent-redis-1 redis-cli FLUSHALL
+```

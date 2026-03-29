@@ -30,6 +30,26 @@ async def run_incident(alert: AlertSignal) -> Incident:
     - api/routes/alerts.py (webhook trigger)
     - scripts/simulate_incident.py (manual trigger)
     """
+    # Deduplication lock: one active incident per (alert_name, namespace) at a time.
+    # Alertmanager re-sends the same alert every repeat_interval — without this,
+    # each re-send creates a duplicate incident and they race to execute the same action.
+    from tools.redis.client import get_redis_client as _get_redis
+    _redis = _get_redis()
+    _lock_key = f"sre:incident_lock:{alert.alert_name}:{alert.namespace}"
+    _acquired = await _redis.set(_lock_key, "1", nx=True, ex=1800)  # 30 min TTL
+    if not _acquired:
+        logger.info(
+            "incident deduplicated — already active for this alert",
+            alert=alert.alert_name,
+            namespace=alert.namespace,
+        )
+        # Return a minimal stub so the API layer gets a clean response
+        return Incident(
+            alert=alert,
+            status=IncidentStatus.OPEN,
+            thread_id="deduplicated",
+        )
+
     incident_id = uuid.uuid4()
     thread_id = str(uuid.uuid4())
 
@@ -73,9 +93,15 @@ async def run_incident(alert: AlertSignal) -> Incident:
         final_incident.status = final_state.values.get("status", final_incident.status)
         final_incident.diagnosis = final_state.values.get("diagnosis", final_incident.diagnosis)
         final_incident.proposed_action = final_state.values.get("proposed_action", final_incident.proposed_action)
+        final_incident.approval = final_state.values.get("approval_request", final_incident.approval)
         final_incident.action_result = final_state.values.get("action_result", final_incident.action_result)
 
     await store.save(final_incident)
+
+    # Release the deduplication lock once the incident reaches a terminal state,
+    # so future alerts for the same problem can be handled if it recurs.
+    if final_incident.status in (IncidentStatus.RESOLVED, IncidentStatus.FAILED):
+        await _redis.delete(_lock_key)
 
     logger.info(
         "agent run complete",
@@ -87,20 +113,36 @@ async def run_incident(alert: AlertSignal) -> Incident:
 
 async def resume_incident(thread_id: str, approval_data: dict[str, Any]) -> Incident:
     """
-    Resume a graph that was suspended at the approve node.
-    Called by api/routes/approvals.py after a human submits a decision.
+    Resume a graph suspended at interrupt_before=["approve"].
+    The approval decision is already in Redis — approve_node reads it directly.
     """
     config = {"configurable": {"thread_id": thread_id}}
 
     async with build_checkpointer() as checkpointer:
         graph = build_sre_graph(checkpointer=checkpointer)
-        await graph.aupdate_state(config, approval_data)
 
         async for _ in graph.astream(None, config=config):
             pass
 
         final_state = await graph.aget_state(config)
-        return final_state.values.get("incident")
+        final_incident = final_state.values.get("incident")
+
+        # Sync final status back to the incident store
+        if final_incident:
+            store = await get_incident_store()
+            final_incident.status = final_state.values.get("status", final_incident.status)
+            final_incident.action_result = final_state.values.get("action_result", final_incident.action_result)
+            final_incident.approval = final_state.values.get("approval_request", final_incident.approval)
+            await store.save(final_incident)
+
+            # Release the deduplication lock so a future recurrence can be handled
+            if final_incident.status in (IncidentStatus.RESOLVED, IncidentStatus.FAILED):
+                from tools.redis.client import get_redis_client as _get_redis
+                _redis = _get_redis()
+                _lock_key = f"sre:incident_lock:{final_incident.alert.alert_name}:{final_incident.alert.namespace}"
+                await _redis.delete(_lock_key)
+
+        return final_incident
 
 
 def main() -> None:

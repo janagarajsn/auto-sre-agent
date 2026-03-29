@@ -64,6 +64,11 @@ def _build_context(state: AgentState) -> str:
         f"## CPU Usage\n{json.dumps(state['raw_metrics'].get('cpu', [])[:5], indent=2)}",
         f"## Memory Usage\n{json.dumps(state['raw_metrics'].get('memory', [])[:5], indent=2)}",
     ]
+
+    rollout = state["raw_metrics"].get("deployment_rollout", [])
+    if rollout:
+        parts.append(f"## Deployment Rollout State\n{json.dumps(rollout, indent=2)}")
+
     if state["raw_logs"]:
         parts.append(f"## Recent Logs\n{''.join(state['raw_logs'][:3])}")
 

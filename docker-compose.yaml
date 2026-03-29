@@ -7,7 +7,9 @@ services:
     environment:
       ENV: dev
       REDIS_URL: redis://redis:6379/0
-      PROMETHEUS_URL: http://prometheus:9090
+      PROMETHEUS_URL: http://host.docker.internal:9091
+      K8S_KUBECONFIG_PATH: /home/sre/.kube/config
+      K8S_SERVER_OVERRIDE: https://host.docker.internal:53968
     depends_on:
       redis:
         condition: service_healthy

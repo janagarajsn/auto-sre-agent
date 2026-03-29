@@ -5,6 +5,7 @@ Supports both in-cluster (production) and kubeconfig (local dev) authentication.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from kubernetes import client, config
@@ -23,8 +24,20 @@ def get_k8s_client() -> ApiClient:
         logger.info("Loading in-cluster Kubernetes config")
         config.load_incluster_config()
     else:
-        logger.info("Loading kubeconfig", path=settings.k8s_kubeconfig_path)
-        config.load_kube_config(config_file=settings.k8s_kubeconfig_path)
+        kubeconfig_path = os.path.expanduser(settings.k8s_kubeconfig_path)
+        logger.info("Loading kubeconfig", path=kubeconfig_path)
+        config.load_kube_config(config_file=kubeconfig_path)
+
+    # Allow overriding the API server host — needed when the agent runs inside
+    # Docker and the kubeconfig has 127.0.0.1 (Kind on host, not reachable as localhost)
+    k8s_server_override = os.environ.get("K8S_SERVER_OVERRIDE")
+    if k8s_server_override:
+        configuration = client.configuration.Configuration.get_default_copy()
+        configuration.host = k8s_server_override
+        configuration.verify_ssl = False
+        client.Configuration.set_default(configuration)
+        logger.info("K8s server overridden", host=k8s_server_override)
+
     return ApiClient()
 
 
